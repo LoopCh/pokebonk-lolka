@@ -1,0 +1,9 @@
+/target
+/data
+*.tar
+*.tar.gz
+
+# Секреты и локальное состояние — никогда не коммитим
+bot.env
+.env
+state*.json

@@ -1,0 +1,8 @@
+target
+.git
+.github
+*.tar
+*.tar.gz
+bot.env
+.env
+state*.json

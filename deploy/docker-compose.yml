@@ -1,0 +1,25 @@
+# Запуск бота на VPS. Лежит в ~/pokebonk-lolka рядом с bot.env и .env.
+#   .env    — только IMAGE=…, его пишет remote-deploy.sh при каждом деплое
+#   bot.env — настройки и секреты бота (создаётся вручную один раз)
+services:
+  bot:
+    image: ${IMAGE:-pokebonk-lolka:latest}
+    container_name: pokebonk-lolka
+    restart: unless-stopped
+    env_file: bot.env
+    volumes:
+      - state:/data
+    # Боту хватает ~10 МБ; лимит защищает VPS, если что-то пойдёт не так.
+    mem_limit: 64m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  state:
