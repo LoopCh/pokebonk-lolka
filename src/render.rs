@@ -1,7 +1,7 @@
 //! Превращает события в карточки (embeds) для Lolka и упаковывает их в сообщения.
 
 use crate::events::{Achievement, Event, PlayerCtx};
-use crate::model::{Embed, Field, Footer, Image, Message, Run};
+use crate::model::{Build, Embed, Field, Footer, Image, Message, Run, RunBuild};
 use crate::{names, util};
 
 const GREEN: u32 = 0x0057_F287;
@@ -10,6 +10,9 @@ const GREY: u32 = 0x0095_A5A6;
 const BLUE: u32 = 0x0034_98DB;
 const ORANGE: u32 = 0x00E6_7E22;
 const PURPLE: u32 = 0x009B_59B6;
+
+/// Сколько предметов перечислять; остальные — «и ещё N».
+const SHOW_ITEMS: usize = 8;
 
 /// Лимиты Lolka: 10 embeds на сообщение и 6000 символов текста на все embeds.
 const MAX_EMBEDS: usize = 10;
@@ -30,7 +33,8 @@ pub fn render(ev: &Event, cfg: &RenderCfg) -> Embed {
             player,
             run,
             achievements,
-        } => run_embed(player, run, achievements, cfg),
+            build,
+        } => run_embed(player, run, achievements, build.as_deref(), cfg),
         Event::Renamed { old, new } => simple(BLUE, format!("✏️ {old} теперь {new}"), None),
         Event::Joined { name, clan } => {
             simple(BLUE, format!("👋 {name} вступил(а) в клан {clan}"), None)
@@ -52,7 +56,7 @@ pub fn render(ev: &Event, cfg: &RenderCfg) -> Embed {
             ..simple(
                 ORANGE,
                 format!(
-                    "⏰ Сезон «{name}» закончится через {}",
+                    "⏰ Сезон {name} закончится через {}",
                     util::fmt_until(end_ms - now_ms)
                 ),
                 Some("Последний шанс поднять клан в рейтинге!".to_string()),
@@ -64,7 +68,7 @@ pub fn render(ev: &Event, cfg: &RenderCfg) -> Embed {
             now_ms,
         } => simple(
             PURPLE,
-            format!("🌱 Начался сезон «{name}»"),
+            format!("🌱 Начался сезон {name}"),
             end_ms.map(|end| format!("Продлится {}", util::fmt_until(end - now_ms))),
         ),
         Event::SeasonFinished { name, clan } => {
@@ -85,7 +89,7 @@ pub fn render(ev: &Event, cfg: &RenderCfg) -> Embed {
                     util::thousands(s.points)
                 )
             });
-            simple(GOLD, format!("🏁 Сезон «{name}» завершён"), description)
+            simple(GOLD, format!("🏁 Сезон {name} завершён"), description)
         }
         Event::Announcement { text } => simple(
             BLUE,
@@ -104,7 +108,13 @@ fn simple(color: u32, title: String, description: Option<String>) -> Embed {
     }
 }
 
-fn run_embed(p: &PlayerCtx, r: &Run, achievements: &[Achievement], cfg: &RenderCfg) -> Embed {
+fn run_embed(
+    p: &PlayerCtx,
+    r: &Run,
+    achievements: &[Achievement],
+    rb: Option<&RunBuild>,
+    cfg: &RenderCfg,
+) -> Embed {
     let title = if r.victory {
         format!("🏆 {} — победа!", p.name)
     } else {
@@ -113,11 +123,14 @@ fn run_embed(p: &PlayerCtx, r: &Run, achievements: &[Achievement], cfg: &RenderC
 
     let start = names::pokemon(r.species);
     let evolved = r.final_species > 0 && r.final_species != r.species;
-    let mons = if evolved {
+    let mut mons = if evolved {
         format!("**{start}** → **{}**", names::pokemon(r.final_species))
     } else {
         format!("**{start}**")
     };
+    if let Some(level) = rb.map(|b| b.level).filter(|l| *l > 0) {
+        mons.push_str(&format!(" · ур. {level}"));
+    }
     let description = format!(
         "{mons}\n{} · тир {} · стадия {}",
         names::biome(&r.biome),
@@ -128,20 +141,19 @@ fn run_embed(p: &PlayerCtx, r: &Run, achievements: &[Achievement], cfg: &RenderC
     let mut fields = vec![
         field("⏱ Время", util::fmt_duration(r.time), true),
         field("💀 Убийства", util::thousands(r.kills), true),
-        field(
-            "🎯 Режим",
-            if r.ranked {
-                "рейтинговый"
-            } else {
-                "обычный"
-            }
-            .to_string(),
-            true,
-        ),
     ];
+    if let Some(damage) = rb.map(|b| b.damage).filter(|d| *d > 0) {
+        fields.push(field("💥 Урон", util::compact(damage), true));
+    }
+    if !r.ranked {
+        fields.push(field("🎯 Режим", "обычный".to_string(), true));
+    }
     if !achievements.is_empty() {
         let lines: Vec<String> = achievements.iter().map(achievement_text).collect();
         fields.push(field("Достижения", lines.join("\n"), false));
+    }
+    if let Some(build) = rb.and_then(|b| b.build.as_ref()) {
+        fields.extend(build_fields(build));
     }
 
     let color = if !achievements.is_empty() {
@@ -192,6 +204,166 @@ fn run_embed(p: &PlayerCtx, r: &Run, achievements: &[Achievement], cfg: &RenderC
         thumbnail,
         fields,
     }
+}
+
+/// Сборка: приёмы с долей урона, главные предметы, витамины, ключевые статы.
+fn build_fields(b: &Build) -> Vec<Field> {
+    let mut out = Vec::new();
+
+    let mut moves: Vec<_> = b.moves.iter().filter(|m| !m.k.is_empty()).collect();
+    moves.sort_by(|a, b| b.dmg.cmp(&a.dmg).then_with(|| a.k.cmp(&b.k)));
+    let total: i64 = moves.iter().map(|m| m.dmg.max(0)).sum();
+    if !moves.is_empty() {
+        let lines: Vec<String> = moves
+            .iter()
+            .map(|m| {
+                let share = if total > 0 {
+                    // Доля в процентах, точность не важна.
+                    #[allow(clippy::cast_precision_loss)]
+                    let pct = m.dmg.max(0) as f64 * 100.0 / total as f64;
+                    format!(" ({pct:.0}%)")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "**{}** · ур. {} — {}{share}",
+                    names::move_name(&m.k),
+                    m.lv,
+                    util::compact(m.dmg)
+                )
+            })
+            .collect();
+        out.push(field("⚔️ Приёмы", lines.join("\n"), false));
+    }
+
+    // Сначала то, чего набрано больше всего: это и определяет сборку.
+    let mut items: Vec<(&str, i64)> = b
+        .items
+        .iter()
+        .map(|(k, v)| {
+            // Количество предметов — небольшое целое.
+            #[allow(clippy::cast_possible_truncation)]
+            let n = v.unwrap_or(1.0).round() as i64;
+            (k.as_str(), n)
+        })
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    if !items.is_empty() {
+        let mut parts: Vec<String> = items
+            .iter()
+            .take(SHOW_ITEMS)
+            .map(|(k, n)| {
+                if *n > 1 {
+                    format!("{} ×{n}", names::item(k))
+                } else {
+                    names::item(k)
+                }
+            })
+            .collect();
+        if items.len() > SHOW_ITEMS {
+            parts.push(format!("и ещё {}", items.len() - SHOW_ITEMS));
+        }
+        let total: i64 = items.iter().map(|(_, n)| n).sum();
+        out.push(field(
+            &format!("🎒 Предметы · {total}"),
+            parts.join(", "),
+            false,
+        ));
+    }
+
+    if !b.vits.is_empty() {
+        let parts: Vec<String> = b
+            .vits
+            .iter()
+            .map(|v| format!("{} {}", names::vitamin(&v.k), v.lv))
+            .collect();
+        out.push(field("💊 Витамины", parts.join(" · "), false));
+    }
+
+    let stats = key_stats(b);
+    if !stats.is_empty() {
+        out.push(field("📊 Ключевые статы", stats, false));
+    }
+    out
+}
+
+/// Несколько характеристик, по которым понятна сборка. Остальные ~30 чисел
+/// из игры в чате только мешают.
+fn key_stats(b: &Build) -> String {
+    let mut lines = Vec::new();
+    if !b.passive.is_empty() {
+        lines.push(format!("🧬 {}", names::passive(&b.passive)));
+    }
+
+    let mut attack = Vec::new();
+    if let Some(v) = b.stat("damage") {
+        let mut s = format!("Урон {}", util::pct(v));
+        if let (Some(sp), Some(ph)) = (b.stat("special"), b.stat("physical")) {
+            s.push_str(&format!(
+                " (спец. {} · физ. {})",
+                util::pct(sp),
+                util::pct(ph)
+            ));
+        }
+        attack.push(s);
+    }
+    if let Some(v) = b.stat("attackSpeed") {
+        attack.push(format!("Ск. атаки {}", util::pct(v)));
+    }
+    if !attack.is_empty() {
+        lines.push(format!("⚔️ {}", attack.join(" · ")));
+    }
+
+    let mut extra = Vec::new();
+    if let Some(v) = b.stat("critChance") {
+        let mut s = format!("Крит {}", util::pct(v));
+        if let Some(cd) = b.stat("critDamage") {
+            s.push_str(&format!(" ×{}", util::pct(cd)));
+        }
+        extra.push(s);
+    }
+    if let Some(v) = b.stat("projectiles") {
+        extra.push(format!("Снаряды {}", util::num(v)));
+    }
+    if let Some(v) = b.stat("area") {
+        extra.push(format!("Область {}", util::pct(v)));
+    }
+    if !extra.is_empty() {
+        lines.push(format!("🎯 {}", extra.join(" · ")));
+    }
+
+    let mut defense = Vec::new();
+    if let Some(v) = b.stat("maxHp") {
+        defense.push(format!("ОЗ {}", util::num(v)));
+    }
+    if let Some(v) = b.stat("armor") {
+        defense.push(format!("Броня {}", util::num(v)));
+    }
+    if let Some(v) = b.stat("regen").filter(|v| *v > 0.0) {
+        defense.push(format!("Реген {}/с", util::num(v)));
+    }
+    if let Some(v) = b.stat("lifesteal").filter(|v| *v > 0.0) {
+        defense.push(format!("Вампиризм {}", util::pct(v)));
+    }
+    if let Some(v) = b.stat("shieldMax").filter(|v| *v > 0.0) {
+        defense.push(format!("Щит {}", util::num(v)));
+    }
+    if !defense.is_empty() {
+        lines.push(format!("🛡 {}", defense.join(" · ")));
+    }
+
+    let mut misc = Vec::new();
+    if let Some(v) = b.stat("luck") {
+        misc.push(format!("Удача {}", util::num(v)));
+    }
+    if let Some(v) = b.stat("xpGain") {
+        misc.push(format!("Опыт {}", util::pct(v)));
+    }
+    if !misc.is_empty() {
+        lines.push(format!("🍀 {}", misc.join(" · ")));
+    }
+    lines.join("\n")
 }
 
 fn field(name: &str, value: String, inline: bool) -> Field {
@@ -292,6 +464,7 @@ mod tests {
                 player: ctx(),
                 run,
                 achievements: vec![],
+                build: None,
             },
             &cfg(),
         );
@@ -325,6 +498,7 @@ mod tests {
                 player: ctx(),
                 run,
                 achievements: vec![Achievement::Shinies(1)],
+                build: None,
             },
             &RenderCfg::default(),
         );
@@ -337,10 +511,78 @@ mod tests {
     }
 
     #[test]
+    fn run_card_with_build() {
+        let rb: RunBuild = serde_json::from_str(crate::model::tests::BUILD).unwrap();
+        let run = Run {
+            species: 1,
+            final_species: 3,
+            biome: "forest".into(),
+            tier: 0,
+            stage: 4,
+            time: 1787.05,
+            kills: 26_645,
+            victory: true,
+            ranked: true,
+            ..Run::default()
+        };
+        let e = render(
+            &Event::RunFinished {
+                player: ctx(),
+                run,
+                achievements: vec![],
+                build: Some(Box::new(rb)),
+            },
+            &RenderCfg::default(),
+        );
+        let text = serde_json::to_string_pretty(&e).unwrap();
+        println!("{text}");
+        assert!(e
+            .description
+            .as_deref()
+            .unwrap()
+            .starts_with("**Бульбазавр** → **Венузавр** · ур. 195\n"));
+        let names: Vec<&str> = e.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "⏱ Время",
+                "💀 Убийства",
+                "💥 Урон",
+                "⚔️ Приёмы",
+                "🎒 Предметы · 46",
+                "💊 Витамины",
+                "📊 Ключевые статы"
+            ]
+        );
+        assert_eq!(e.fields[2].value, "238M");
+        assert_eq!(
+            e.fields[3].value,
+            "**Fu T Grass** · ур. 5 — 117M (75%)\n\
+             **Solar Beam** · ур. 8 — 35.9M (23%)\n\
+             **Razor Leaf** · ур. 8 — 2.8M (2%)"
+        );
+        assert_eq!(
+            e.fields[4].value,
+            "Leftovers ×4, Счастливое яйцо ×4, PP Max ×4, Делитель опыта ×3, Soothe Bell ×3, \
+             Звёздный осколок ×3, Choice Band ×2, Muscle Band ×2, и ещё 19"
+        );
+        assert_eq!(e.fields[5].value, "Exp Candy 10 · Calcium 10 · Ether 10");
+        assert_eq!(
+            e.fields[6].value,
+            "🧬 Photosynthesis\n\
+             ⚔️ Урон 308% (спец. 341% · физ. 202%) · Ск. атаки 304%\n\
+             🎯 Крит 27% ×275% · Снаряды 4 · Область 145%\n\
+             🛡 ОЗ 174 · Броня 101 · Реген 4.9/с · Вампиризм 3%\n\
+             🍀 Удача 110 · Опыт 1110%"
+        );
+        assert!(text_len(&e) < 1500, "карточка слишком длинная");
+    }
+
+    #[test]
     fn season_cards() {
         let e = render(
             &Event::SeasonFinished {
-                name: "GEN 1".into(),
+                name: "«GEN 1»".into(),
                 clan: Some((
                     "[ANP]".into(),
                     ClanSeasonSnap {
@@ -359,7 +601,7 @@ mod tests {
 
         let e = render(
             &Event::SeasonEndingSoon {
-                name: "GEN 1".into(),
+                name: "«GEN 1»".into(),
                 end_ms: 10 * 3_600_000,
                 now_ms: 0,
             },

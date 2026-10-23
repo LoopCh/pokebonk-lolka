@@ -2,8 +2,8 @@
 //! сообщить. Здесь нет сети и файлов, поэтому всё легко покрыть тестами.
 
 use crate::model::{
-    Clan, ClanSeasonSnap, ClanSnap, MemberSnap, Player, PlayerSnap, Run, SeasonInfo, SeasonSnap,
-    Stats,
+    Clan, ClanSeasonSnap, ClanSnap, MemberSnap, Player, PlayerSnap, Run, RunBuild, SeasonInfo,
+    SeasonSnap, Stats,
 };
 use std::collections::BTreeMap;
 
@@ -37,6 +37,8 @@ pub enum Event {
         player: PlayerCtx,
         run: Run,
         achievements: Vec<Achievement>,
+        /// Сборка; подгружается отдельным запросом после сравнения.
+        build: Option<Box<RunBuild>>,
     },
     Renamed {
         old: String,
@@ -124,6 +126,7 @@ pub fn player_update(prev: Option<&PlayerSnap>, p: &Player) -> (Vec<Event>, Play
                 player: ctx.clone(),
                 run: (*run).clone(),
                 achievements: Vec::new(),
+                build: None,
             });
         }
         // Статистика общая, поэтому достижения приписываем последнему забегу.
@@ -131,6 +134,7 @@ pub fn player_update(prev: Option<&PlayerSnap>, p: &Player) -> (Vec<Event>, Play
             player: ctx,
             run: (*last).clone(),
             achievements: achievements(&prev.stats, &p.stats),
+            build: None,
         });
     }
 
@@ -316,11 +320,11 @@ pub fn season_update(
                 .map(|s| (clan_label(&c.tag, &c.name), s.clone()))
         });
         events.push(Event::SeasonFinished {
-            name: prev.name.clone(),
+            name: season_label(prev.n, &prev.name),
             clan: clan_result,
         });
         events.push(Event::SeasonStarted {
-            name: info.name.clone(),
+            name: season_label(info.n, &info.name),
             end_ms: (end > 0).then_some(end),
             now_ms,
         });
@@ -347,6 +351,16 @@ pub fn season_update(
     (events, snap)
 }
 
+/// Как назвать сезон в тексте: `«GEN 1»`, а без названия — `№2`.
+pub fn season_label(n: i64, name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        format!("№{n}")
+    } else {
+        format!("«{name}»")
+    }
+}
+
 fn remind(snap: &mut SeasonSnap, live: bool, now_ms: i64, remind_ms: i64) -> Vec<Event> {
     let due = live
         && remind_ms > 0
@@ -358,7 +372,7 @@ fn remind(snap: &mut SeasonSnap, live: bool, now_ms: i64, remind_ms: i64) -> Vec
     }
     snap.reminded = true;
     vec![Event::SeasonEndingSoon {
-        name: snap.name.clone(),
+        name: season_label(snap.n, &snap.name),
         end_ms: snap.end,
         now_ms,
     }]
@@ -439,12 +453,14 @@ mod tests {
             run,
             achievements,
             player,
+            build,
         } = &events[1]
         else {
             panic!("expected run");
         };
         assert_eq!(run.date, 300);
         assert_eq!(player.clan_tag.as_deref(), Some("ANP"));
+        assert!(build.is_none(), "сборку подгружает tracker, а не events");
         assert_eq!(
             achievements,
             &vec![
@@ -626,7 +642,7 @@ mod tests {
         assert_eq!(
             events,
             vec![Event::SeasonEndingSoon {
-                name: "GEN 1".into(),
+                name: "«GEN 1»".into(),
                 end_ms: 100 * HOUR,
                 now_ms: now
             }]
@@ -657,7 +673,7 @@ mod tests {
         assert_eq!(
             events[0],
             Event::SeasonFinished {
-                name: "GEN 1".into(),
+                name: "«GEN 1»".into(),
                 clan: Some((
                     "[ANP]".into(),
                     ClanSeasonSnap {
@@ -669,6 +685,12 @@ mod tests {
             }
         );
         assert!(matches!(events[1], Event::SeasonStarted { .. }));
+    }
+
+    #[test]
+    fn season_labels() {
+        assert_eq!(season_label(1, "GEN 1"), "«GEN 1»");
+        assert_eq!(season_label(2, " "), "№2");
     }
 
     #[test]

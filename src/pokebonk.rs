@@ -4,14 +4,17 @@
 //! * `/clans/{id}` и `/leaderboard` — нужна сессия; хватает гостевой из
 //!   `POST /auth/guest`. Протухший токен заменяется новым автоматически.
 
-use crate::model::{ApiError, Clan, GuestAuth, Leaderboard, Player};
-use anyhow::{anyhow, bail, Context, Result};
+use crate::model::{ApiError, Clan, GuestAuth, Leaderboard, Player, RunBuild};
+use anyhow::{bail, Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use std::time::{Duration, Instant};
 
 /// Не создавать гостей чаще, чем раз в 10 минут, даже если что-то пошло не так.
 const GUEST_COOLDOWN: Duration = Duration::from_secs(600);
+/// Сколько раз пробовать запрос при сетевой ошибке и пауза между попытками.
+const NET_ATTEMPTS: u32 = 3;
+const NET_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub struct Api {
     http: Client,
@@ -50,7 +53,17 @@ impl Api {
     }
 
     pub async fn leaderboard(&mut self) -> Result<Leaderboard> {
-        self.get("/leaderboard", &[("mode", "kills")], true).await
+        // Боту нужен только блок info о сезоне, поэтому список — минимальный.
+        self.get("/leaderboard", &[("mode", "kills"), ("limit", "1")], true)
+            .await
+    }
+
+    /// Сборка забега: приёмы, предметы, витамины, статы.
+    pub async fn run_build(&mut self, run_id: &str) -> Result<RunBuild> {
+        if run_id.is_empty() || !run_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            bail!("странный id забега: {run_id}");
+        }
+        self.get(&format!("/runs/{run_id}/build"), &[], true).await
     }
 
     async fn get<T: DeserializeOwned>(
@@ -63,27 +76,7 @@ impl Api {
             if auth && self.token.is_none() {
                 self.new_guest().await?;
             }
-            let mut req = self
-                .http
-                .get(format!("{}{path}", self.base))
-                .query(query)
-                .header("X-Device", &self.device_id)
-                .header("Accept", "application/json");
-            if auth {
-                if let Some(token) = &self.token {
-                    req = req.bearer_auth(token);
-                }
-            }
-
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| anyhow!("{path}: {}", e.without_url()))?;
-            let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| anyhow!("{path}: {}", e.without_url()))?;
+            let (status, body) = self.fetch(path, query, auth).await?;
 
             // API может вернуть {"error": …} даже с кодом 200.
             let api_error = serde_json::from_str::<ApiError>(&body)
@@ -105,6 +98,48 @@ impl Api {
         bail!("{path}: сессия не принимается даже после обновления")
     }
 
+    /// Один GET с повтором при сетевой ошибке (обрыв, тайм-аут).
+    async fn fetch(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        auth: bool,
+    ) -> Result<(StatusCode, String)> {
+        let mut attempt = 1;
+        loop {
+            let mut req = self
+                .http
+                .get(format!("{}{path}", self.base))
+                .query(query)
+                .header("X-Device", &self.device_id)
+                .header("Accept", "application/json");
+            if auth {
+                if let Some(token) = &self.token {
+                    req = req.bearer_auth(token);
+                }
+            }
+            let result = match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    resp.text().await.map(|body| (status, body))
+                }
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(ok) => return Ok(ok),
+                Err(e) if attempt < NET_ATTEMPTS => {
+                    debug!(
+                        "{path}: попытка {attempt} не удалась ({:#}), повторяю",
+                        net_error(path, e)
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(NET_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(net_error(path, e)),
+            }
+        }
+    }
+
     async fn new_guest(&mut self) -> Result<()> {
         if let Some(t) = self.last_guest {
             if t.elapsed() < GUEST_COOLDOWN {
@@ -123,12 +158,9 @@ impl Api {
             .header("Accept", "application/json")
             .send()
             .await
-            .map_err(|e| anyhow!("/auth/guest: {}", e.without_url()))?;
+            .map_err(|e| net_error("/auth/guest", e))?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("/auth/guest: {}", e.without_url()))?;
+        let body = resp.text().await.map_err(|e| net_error("/auth/guest", e))?;
         if !status.is_success() {
             bail!("/auth/guest: HTTP {}: {}", status.as_u16(), snippet(&body));
         }
@@ -160,6 +192,12 @@ fn is_session_error(status: StatusCode, message: &str) -> bool {
     ]
     .iter()
     .any(|needle| m.contains(needle))
+}
+
+/// Сетевая ошибка с полной цепочкой причин («…: operation timed out»),
+/// но без URL в тексте.
+pub fn net_error(path: &str, e: reqwest::Error) -> anyhow::Error {
+    anyhow::Error::new(e.without_url()).context(path.to_string())
 }
 
 /// Начало тела ответа для сообщений об ошибках.

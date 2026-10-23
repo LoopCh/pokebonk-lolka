@@ -60,7 +60,7 @@ impl Webhook {
             let resp = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    last = e.without_url().to_string();
+                    last = format!("{:#}", anyhow::Error::new(e.without_url()));
                     warn!("lolka: попытка {attempt}/{ATTEMPTS} не удалась: {last}");
                     tokio::time::sleep(backoff(attempt)).await;
                     continue;

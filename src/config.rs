@@ -27,6 +27,33 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// Для каких забегов подгружать сборку (приёмы, предметы, статы).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildDetails {
+    Off,
+    /// Только победы.
+    Wins,
+    /// Победы и забеги длиннее `LONG_RUN_SECS` — короткие сливы без подробностей.
+    Long,
+    All,
+}
+
+/// Забег от 5 минут считается достаточно долгим для подробной карточки.
+pub const LONG_RUN_SECS: f64 = 300.0;
+
+impl BuildDetails {
+    /// Нужна ли сборка для забега. У нерейтинговых забегов нет id — им нельзя.
+    pub fn wants(self, victory: bool, time_secs: f64, has_id: bool) -> bool {
+        has_id
+            && match self {
+                Self::Off => false,
+                Self::Wins => victory,
+                Self::Long => victory || time_secs >= LONG_RUN_SECS,
+                Self::All => true,
+            }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub webhook_url: Secret,
@@ -43,6 +70,7 @@ pub struct Config {
     pub dry_run: bool,
     pub log_level: String,
     pub render: RenderCfg,
+    pub build_details: BuildDetails,
 }
 
 impl Config {
@@ -104,6 +132,18 @@ impl Config {
             None => 24,
         };
 
+        let build_details = match var("BUILD_DETAILS").as_deref() {
+            None | Some("long") => BuildDetails::Long,
+            Some("off" | "none" | "0") => BuildDetails::Off,
+            Some("wins") => BuildDetails::Wins,
+            Some("all") => BuildDetails::All,
+            Some(other) => {
+                return Err(format!(
+                    "BUILD_DETAILS: ожидается off, wins, long или all, получено «{other}»"
+                ))
+            }
+        };
+
         let sprite_url = match get("SPRITE_URL") {
             None => Some(DEFAULT_SPRITE.to_string()),
             Some(s) if s.trim().is_empty() => None,
@@ -132,6 +172,7 @@ impl Config {
                 sprite_url,
                 player_url: var("PLAYER_URL"),
             },
+            build_details,
         })
     }
 }
@@ -161,6 +202,7 @@ mod tests {
         assert_eq!(c.api_base, "https://api.pokebonk.com");
         assert_eq!(c.render.sprite_url.as_deref(), Some(DEFAULT_SPRITE));
         assert!(!c.dry_run);
+        assert_eq!(c.build_details, BuildDetails::Long);
         assert!(!format!("{c:?}").contains("abc"), "секрет попал в Debug");
     }
 
@@ -178,6 +220,21 @@ mod tests {
         assert_eq!(c.season_every, None);
         assert_eq!(c.render.sprite_url, None);
         assert!(c.dry_run);
+    }
+
+    #[test]
+    fn build_details() {
+        let c = cfg(&[HOOK, ("POKEBONK_PLAYERS", "a"), ("BUILD_DETAILS", "wins")]).unwrap();
+        assert_eq!(c.build_details, BuildDetails::Wins);
+        assert!(cfg(&[HOOK, ("POKEBONK_PLAYERS", "a"), ("BUILD_DETAILS", "x")]).is_err());
+
+        let long = BuildDetails::Long;
+        assert!(long.wants(true, 60.0, true));
+        assert!(long.wants(false, 301.0, true));
+        assert!(!long.wants(false, 100.0, true));
+        assert!(!long.wants(true, 900.0, false), "без id сборку не получить");
+        assert!(!BuildDetails::Off.wants(true, 900.0, true));
+        assert!(BuildDetails::All.wants(false, 1.0, true));
     }
 
     #[test]

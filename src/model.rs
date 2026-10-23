@@ -170,6 +170,66 @@ pub struct GuestAuth {
     pub token: String,
 }
 
+/// Ответ `GET /runs/{id}/build`: подробности одного забега.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunBuild {
+    /// Весь нанесённый урон.
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub damage: i64,
+    /// Уровень покемона в конце забега.
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub level: i64,
+    pub build: Option<Build>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Build {
+    /// Приёмы с уровнем и уроном.
+    pub moves: Vec<BuildMove>,
+    /// Предмет -> сколько штук.
+    pub items: BTreeMap<String, Option<f64>>,
+    /// Витамины с уровнем.
+    pub vits: Vec<BuildVitamin>,
+    /// Итоговые характеристики: множители (1.0 = 100 %) и абсолютные числа.
+    pub stats: BTreeMap<String, Option<f64>>,
+    /// Пассивная способность.
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub passive: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuildMove {
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub k: String,
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub lv: i64,
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub dmg: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuildVitamin {
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub k: String,
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub lv: i64,
+}
+
+impl Build {
+    /// Значение характеристики, если оно есть.
+    pub fn stat(&self, key: &str) -> Option<f64> {
+        self.stats
+            .get(key)
+            .copied()
+            .flatten()
+            .filter(|v| v.is_finite())
+    }
+}
+
 /// Ошибка API: `{"error": "Tu sesión ha caducado. Vuelve a entrar."}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
@@ -287,7 +347,7 @@ pub struct Field {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Ответы, сокращённые из реальных, с вымышленными никами.
@@ -324,6 +384,29 @@ mod tests {
         assert_eq!(info.name, "GEN 1");
         assert_eq!(info.end, Some(1_792_540_800_000));
         assert!(info.live);
+    }
+
+    /// Реальный ответ `/runs/{id}/build`, ник заменён.
+    pub const BUILD: &str = r#"{"id":"482a03d4b41c4cd8aec8fe26c283b399","user":{"id":"u1","name":"ash"},"date":1792651509156,"species":1,"finalSpecies":3,"biome":"forest","tier":0,"stage":4,"time":1787.0536,"kills":26645,"damage":237565030,"level":195,"victory":true,"ranked":true,"moves":["fu-t-grass","razor-leaf","solar-beam"],"items":["lucky-egg","muscle-band"],"build":{"vits":[{"k":"exp-candy","lv":10},{"k":"calcium","lv":10},{"k":"ether","lv":10}],"items":{"pp-max":4,"big-root":1,"life-orb":1,"exp-share":3,"flame-orb":1,"leftovers":4,"lucky-egg":4,"toxic-orb":1,"zoom-lens":1,"dusk-stone":1,"light-clay":1,"quick-claw":2,"rare-candy":1,"razor-claw":2,"smoke-ball":1,"star-piece":3,"choice-band":2,"cleanse-tag":1,"expert-belt":1,"master-ball":1,"muscle-band":2,"soothe-bell":3,"choice-scarf":1,"choice-specs":1,"quick-powder":1,"sitrus-berry":1,"wise-glasses":1},"moves":[{"k":"fu-t-grass","lv":5,"dmg":116694510},{"k":"razor-leaf","lv":8,"dmg":2829537},{"k":"solar-beam","lv":8,"dmg":35910603}],"stats":{"area":1.45,"gold":1.5,"luck":109.61,"slam":1,"armor":101.2,"maxHp":174.28,"regen":4.91,"damage":3.08,"thorns":0,"xpGain":11.1,"evasion":0.07,"healing":2,"powerup":1,"special":3.41,"duration":1.49,"megaCrit":0,"overheal":0,"physical":2.02,"lifesteal":0.03,"moveSpeed":1.31,"projSpeed":1.15,"shieldMax":0,"critChance":0.27,"critDamage":2.75,"eliteSpawn":1,"extraJumps":0,"jumpHeight":1,"attackSpeed":3.04,"eliteDamage":1.15,"pickupRange":12,"projectiles":4,"statusChance":1.1,"statusDamage":1.1,"superEffective":1.3},"passive":"photosynthesis"}}"#;
+
+    #[test]
+    fn parses_build() {
+        let b: RunBuild = serde_json::from_str(BUILD).unwrap();
+        assert_eq!(b.damage, 237_565_030);
+        assert_eq!(b.level, 195);
+        let build = b.build.unwrap();
+        assert_eq!(build.moves.len(), 3);
+        assert_eq!(build.moves[0].dmg, 116_694_510);
+        assert_eq!(build.items.len(), 27);
+        assert_eq!(build.items["leftovers"], Some(4.0));
+        assert_eq!(build.vits[2].k, "ether");
+        assert_eq!(build.stat("critChance"), Some(0.27));
+        assert_eq!(build.stat("nope"), None);
+        assert_eq!(build.passive, "photosynthesis");
+
+        let empty: RunBuild = serde_json::from_str(r#"{"build":null,"damage":null}"#).unwrap();
+        assert!(empty.build.is_none());
+        assert_eq!(empty.damage, 0);
     }
 
     #[test]

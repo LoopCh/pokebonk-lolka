@@ -22,7 +22,10 @@ pub fn http_client() -> Result<reqwest::Client> {
         .user_agent(concat!("pokebonk-lolka/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(2)
+        // Без пула: запросы идут раз в минуту, а простаивающие соединения кто-то
+        // по дороге молча обрывает, и следующий запрос висит до тайм-аута.
+        .pool_max_idle_per_host(0)
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
         .context("не удалось создать HTTP-клиент")
 }
@@ -104,6 +107,8 @@ impl Tracker {
                 self.poll_season(&mut found).await;
             }
         }
+
+        self.attach_builds(&mut found).await;
 
         if !found.is_empty() {
             info!("событий: {}", found.len());
@@ -232,6 +237,28 @@ impl Tracker {
         );
         found.extend(evs);
         self.state.season = snap;
+    }
+
+    /// Подгружает сборки для подходящих забегов. Не получилось — карточка
+    /// уйдёт без сборки, это не повод терять событие.
+    async fn attach_builds(&mut self, found: &mut [events::Event]) {
+        let mode = self.cfg.build_details;
+        for ev in found.iter_mut() {
+            let events::Event::RunFinished { run, build, .. } = ev else {
+                continue;
+            };
+            let Some(run_id) = run.id.as_deref() else {
+                continue;
+            };
+            if !mode.wants(run.victory, run.time, true) {
+                continue;
+            }
+            match self.api.run_build(run_id).await {
+                Ok(b) => *build = Some(Box::new(b)),
+                Err(e) => warn!("сборка забега {run_id}: {e:#}"),
+            }
+            tokio::time::sleep(REQUEST_GAP).await;
+        }
     }
 
     fn queue(&mut self, messages: Vec<Message>) {

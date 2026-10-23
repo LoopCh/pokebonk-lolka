@@ -169,6 +169,8 @@ pub fn biome(code: &str) -> String {
     match code {
         "forest" => "Лес".to_string(),
         "desert" => "Пустыня".to_string(),
+        "coast" => "Побережье бурь".to_string(),
+        "glacier" => "Ледник".to_string(),
         "cave" => "Пещера".to_string(),
         "sea" | "ocean" => "Море".to_string(),
         "mountain" => "Горы".to_string(),
@@ -189,6 +191,71 @@ pub fn role(code: &str) -> String {
         "member" => "участник".to_string(),
         other => other.to_string(),
     }
+}
+
+// Названия из сборки. API отдаёт коды, а русские названия игра подставляет
+// сама; здесь те, что известны точно (из интерфейса игры). Остальные коды
+// показываются по-английски: `life-orb` -> `Life Orb`.
+
+const ITEMS_RU: &[(&str, &str)] = &[
+    ("binding-band", "Связывающая повязка"),
+    ("dusk-stone", "Сумеречный камень"),
+    ("exp-share", "Делитель опыта"),
+    ("light-clay", "Лёгкая глина"),
+    ("lucky-egg", "Счастливое яйцо"),
+    ("metronome", "Метроном"),
+    ("silver-powder", "Серебряная пыль"),
+    ("star-piece", "Звёздный осколок"),
+];
+
+const MOVES_RU: &[(&str, &str)] = &[
+    ("signal-beam", "Сигнальный луч"),
+    ("silver-wind", "Серебряный ветер"),
+    ("smog", "Смог"),
+    ("supersonic", "Ультразвук"),
+];
+
+const VITAMINS_RU: &[(&str, &str)] = &[
+    ("elixir", "Эликсир"),
+    ("pp-up", "Больше PP"),
+    ("star-piece", "Звёздный осколок"),
+];
+
+const PASSIVES_RU: &[(&str, &str)] = &[("compound-eyes", "Составные глаза")];
+
+pub fn item(code: &str) -> String {
+    lookup(ITEMS_RU, code)
+}
+
+pub fn move_name(code: &str) -> String {
+    lookup(MOVES_RU, code)
+}
+
+pub fn vitamin(code: &str) -> String {
+    lookup(VITAMINS_RU, code)
+}
+
+pub fn passive(code: &str) -> String {
+    lookup(PASSIVES_RU, code)
+}
+
+fn lookup(table: &[(&str, &str)], code: &str) -> String {
+    table
+        .iter()
+        .find(|(k, _)| *k == code)
+        .map_or_else(|| pretty_code(code), |(_, v)| (*v).to_string())
+}
+
+/// `life-orb` -> `Life Orb`, `pp-max` -> `PP Max`.
+pub fn pretty_code(code: &str) -> String {
+    code.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| match w {
+            "pp" | "hp" | "xp" => w.to_uppercase(),
+            _ => capitalize(w),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn capitalize(s: &str) -> String {
@@ -218,7 +285,20 @@ mod tests {
     fn biomes_and_roles() {
         assert_eq!(biome("forest"), "Лес");
         assert_eq!(biome("lava"), "Lava");
+        assert_eq!(biome("coast"), "Побережье бурь");
         assert_eq!(role("leader"), "лидер");
         assert_eq!(role("weird"), "weird");
+    }
+
+    #[test]
+    fn build_names() {
+        assert_eq!(item("lucky-egg"), "Счастливое яйцо");
+        assert_eq!(item("life-orb"), "Life Orb");
+        assert_eq!(item("pp-max"), "PP Max");
+        assert_eq!(move_name("silver-wind"), "Серебряный ветер");
+        assert_eq!(move_name("fu-t-grass"), "Fu T Grass");
+        assert_eq!(vitamin("exp-candy"), "Exp Candy");
+        assert_eq!(passive("photosynthesis"), "Photosynthesis");
+        assert_eq!(pretty_code(""), "");
     }
 }

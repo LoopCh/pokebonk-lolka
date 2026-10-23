@@ -83,6 +83,38 @@ pub fn thousands(n: i64) -> String {
     out
 }
 
+/// Короткая запись больших чисел, как в игре: `950`, `32.2K`, `238M`, `1.2B`.
+pub fn compact(n: i64) -> String {
+    // Точность до десятых здесь важнее точного значения.
+    #[allow(clippy::cast_precision_loss)]
+    let v = n as f64;
+    let (value, suffix) = match n.unsigned_abs() {
+        0..=999 => return n.to_string(),
+        1_000..=999_999 => (v / 1e3, "K"),
+        1_000_000..=999_999_999 => (v / 1e6, "M"),
+        _ => (v / 1e9, "B"),
+    };
+    if value.abs() >= 99.95 {
+        format!("{value:.0}{suffix}")
+    } else {
+        format!("{value:.1}{suffix}")
+    }
+}
+
+/// Множитель в проценты: `3.08` -> `308%`, `0.27` -> `27%`.
+pub fn pct(x: f64) -> String {
+    format!("{:.0}%", x * 100.0)
+}
+
+/// Число без лишних нулей: `4` -> `4`, `4.91` -> `4.9`, `174.28` -> `174`.
+pub fn num(x: f64) -> String {
+    if x.abs() >= 100.0 || (x - x.round()).abs() < 0.05 {
+        format!("{x:.0}")
+    } else {
+        format!("{x:.1}")
+    }
+}
+
 /// Процентное кодирование для подстановки в URL.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::new();
@@ -160,6 +192,18 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(28_077), "28\u{a0}077");
         assert_eq!(thousands(-1_234_567), "-1\u{a0}234\u{a0}567");
+        assert_eq!(compact(950), "950");
+        assert_eq!(compact(32_200), "32.2K");
+        assert_eq!(compact(2_829_537), "2.8M");
+        assert_eq!(compact(116_694_510), "117M");
+        assert_eq!(compact(237_565_030), "238M");
+        assert_eq!(compact(1_234_000_000), "1.2B");
+        assert_eq!(compact(999_999), "1000K");
+        assert_eq!(pct(3.08), "308%");
+        assert_eq!(pct(0.27), "27%");
+        assert_eq!(num(4.0), "4");
+        assert_eq!(num(4.91), "4.9");
+        assert_eq!(num(174.28), "174");
         assert_eq!(url_encode("Max Verstappen"), "Max%20Verstappen");
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 4), "abc");
