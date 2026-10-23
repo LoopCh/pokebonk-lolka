@@ -534,8 +534,6 @@ mod tests {
             },
             &RenderCfg::default(),
         );
-        let text = serde_json::to_string_pretty(&e).unwrap();
-        println!("{text}");
         assert!(e
             .description
             .as_deref()
@@ -557,19 +555,20 @@ mod tests {
         assert_eq!(e.fields[2].value, "238M");
         assert_eq!(
             e.fields[3].value,
-            "**Fu T Grass** · ур. 5 — 117M (75%)\n\
-             **Solar Beam** · ур. 8 — 35.9M (23%)\n\
-             **Razor Leaf** · ур. 8 — 2.8M (2%)"
+            "**Слияние типов: Травяной** · ур. 5 — 117M (75%)\n\
+             **Солнечный луч** · ур. 8 — 35.9M (23%)\n\
+             **Бритвенный лист** · ур. 8 — 2.8M (2%)"
         );
         assert_eq!(
             e.fields[4].value,
-            "Leftovers ×4, Счастливое яйцо ×4, PP Max ×4, Делитель опыта ×3, Soothe Bell ×3, \
-             Звёздный осколок ×3, Choice Band ×2, Muscle Band ×2, и ещё 19"
+            "Остатки еды ×4, Счастливое яйцо ×4, Максимум PP ×4, Делитель опыта ×3, \
+             Успокаивающий колокольчик ×3, Звёздный осколок ×3, Лента выбора ×2, \
+             Мышечная повязка ×2, и ещё 19"
         );
-        assert_eq!(e.fields[5].value, "Exp Candy 10 · Calcium 10 · Ether 10");
+        assert_eq!(e.fields[5].value, "Конфета опыта 10 · Кальций 10 · Эфир 10");
         assert_eq!(
             e.fields[6].value,
-            "🧬 Photosynthesis\n\
+            "🧬 Фотосинтез\n\
              ⚔️ Урон 308% (спец. 341% · физ. 202%) · Ск. атаки 304%\n\
              🎯 Крит 27% ×275% · Снаряды 4 · Область 145%\n\
              🛡 ОЗ 174 · Броня 101 · Реген 4.9/с · Вампиризм 3%\n\

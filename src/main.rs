@@ -3,16 +3,20 @@
 #[macro_use]
 mod log;
 
+mod board;
 mod config;
+mod digest;
 mod events;
 mod lolka;
 mod model;
 mod names;
+mod news;
 mod pokebonk;
 mod render;
 mod serde_util;
 mod state;
 mod tracker;
+mod tz;
 mod util;
 
 use anyhow::{bail, Result};

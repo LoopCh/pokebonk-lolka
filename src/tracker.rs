@@ -1,13 +1,11 @@
 //! Основной цикл: опросить API, сравнить со снимками, отправить события.
 
 use crate::config::Config;
-use crate::events;
 use crate::lolka::{SendError, Webhook};
 use crate::model::Message;
 use crate::pokebonk::Api;
-use crate::render;
-use crate::state::{State, MAX_OUTBOX};
-use crate::util;
+use crate::state::{Channel, Outgoing, State, MAX_OUTBOX};
+use crate::{board, digest, events, news, render, util};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -16,6 +14,9 @@ use std::time::{Duration, Instant};
 const REQUEST_GAP: Duration = Duration::from_millis(300);
 /// Пауза между сообщениями в Lolka (лимит — 30 в минуту на вебхук).
 const MESSAGE_GAP: Duration = Duration::from_millis(2100);
+/// Если бот был выключен в момент итогов, опоздавшие итоги публикуются,
+/// только пока не прошло столько времени.
+const DIGEST_GRACE_MS: i64 = 6 * 3_600_000;
 
 pub fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -34,10 +35,15 @@ pub struct Tracker {
     cfg: Config,
     api: Api,
     hook: Webhook,
+    news_hook: Option<Webhook>,
+    board_hook: Option<Webhook>,
+    digest_hook: Option<Webhook>,
     state: State,
     last_sweep: Option<Instant>,
     last_season: Option<Instant>,
     last_resolve: Option<Instant>,
+    last_news: Option<Instant>,
+    last_board: Option<Instant>,
     saved_text: String,
 }
 
@@ -56,15 +62,37 @@ impl Tracker {
             state.device_id.clone(),
             state.guest_token.clone(),
         );
-        let hook = Webhook::new(http, cfg.webhook_url.clone(), cfg.dry_run);
+        let make =
+            |url: &crate::config::Secret| Webhook::new(http.clone(), url.clone(), cfg.dry_run);
+        let hook = make(&cfg.webhook_url);
+        let news_hook = cfg.news_webhook.as_ref().map(make);
+        let board_hook = cfg.board_webhook.as_ref().map(make);
+        let digest_hook = cfg
+            .digest
+            .as_ref()
+            .and_then(|d| d.webhook.as_ref())
+            .map(make);
+
+        // Очередь из версий до 0.3 — в основной канал.
+        let old: Vec<Message> = std::mem::take(&mut state.outbox);
+        state.queue.extend(old.into_iter().map(|message| Outgoing {
+            channel: Channel::Runs,
+            message,
+        }));
+
         Ok(Self {
             cfg,
             api,
             hook,
+            news_hook,
+            board_hook,
+            digest_hook,
             state,
             last_sweep: None,
             last_season: None,
             last_resolve: None,
+            last_news: None,
+            last_board: None,
             saved_text: String::new(),
         })
     }
@@ -109,6 +137,9 @@ impl Tracker {
         }
 
         self.attach_builds(&mut found).await;
+        for ev in &found {
+            digest::record(&mut self.state.day, ev);
+        }
 
         if !found.is_empty() {
             info!("событий: {}", found.len());
@@ -117,12 +148,126 @@ impl Tracker {
                 .map(|e| render::render(e, &self.cfg.render))
                 .collect();
             let messages = render::pack(embeds, self.cfg.webhook_username.as_deref());
-            self.queue(messages);
+            self.queue(Channel::Runs, messages);
+        }
+
+        self.maybe_digest();
+        if self.news_hook.is_some() && due(self.last_news, self.cfg.news_every) {
+            self.last_news = Some(Instant::now());
+            self.poll_news().await;
         }
         self.flush().await;
+        if self.board_hook.is_some() && due(self.last_board, self.cfg.board_every) {
+            self.last_board = Some(Instant::now());
+            self.update_board().await;
+        }
 
         self.state.guest_token = self.api.token().map(str::to_string);
         self.save();
+    }
+
+    /// Итоги дня: по расписанию собрать карточку и начать новый период.
+    fn maybe_digest(&mut self) {
+        let Some(cfg) = self.cfg.digest.clone() else {
+            return;
+        };
+        let zone = self.cfg.zone;
+        let now = util::now_ms();
+        let day = &mut self.state.day;
+        if day.next_at == 0 {
+            *day = digest::new_day(now, zone, cfg.minute, self.state.clan.as_ref());
+            info!(
+                "итоги дня: следующие в {}",
+                util::iso8601(self.state.day.next_at)
+            );
+            return;
+        }
+        if let Some(clan) = &self.state.clan {
+            digest::capture_start(day, clan);
+        }
+        if now < day.next_at {
+            return;
+        }
+
+        if now - day.next_at <= DIGEST_GRACE_MS {
+            match digest::render(day, self.state.clan.as_ref(), zone) {
+                Some(embed) => {
+                    info!("итоги дня: игроков {}", day.players.len());
+                    let messages = render::pack(vec![embed], self.cfg.webhook_username.as_deref());
+                    self.queue(Channel::Digest, messages);
+                }
+                None => info!("итоги дня: никто не играл, пропускаю"),
+            }
+        } else {
+            warn!("итоги дня пропущены: бот был выключен в момент публикации");
+        }
+        self.state.day = digest::new_day(now, zone, cfg.minute, self.state.clan.as_ref());
+    }
+
+    async fn poll_news(&mut self) {
+        let items = match self.api.news().await {
+            Ok(items) => items,
+            Err(e) => {
+                warn!("новости: {e:#}");
+                return;
+            }
+        };
+        let first = self.state.news_seen.is_none();
+        let (fresh, seen) = news::new_items(self.state.news_seen, &items);
+        if first {
+            info!("новости: запомнил {} уже вышедших", items.len());
+        }
+        let messages: Vec<Message> = fresh
+            .into_iter()
+            .map(|item| {
+                info!("новость №{}: {}", item.id, item.text.title);
+                Message {
+                    content: None,
+                    username: self.cfg.webhook_username.clone(),
+                    embeds: vec![news::render(item)],
+                }
+            })
+            .collect();
+        self.queue(Channel::News, messages);
+        self.state.news_seen = seen;
+    }
+
+    /// Табло: первое сообщение отправляется, дальше только редактируется.
+    async fn update_board(&mut self) {
+        let (Some(hook), Some(clan)) = (&self.board_hook, &self.state.clan) else {
+            return;
+        };
+        let embed = board::render(
+            clan,
+            &self.state.players,
+            &self.state.season,
+            &self.state.day,
+            util::now_ms(),
+        );
+        let msg = Message {
+            content: None,
+            username: self.cfg.webhook_username.clone(),
+            embeds: vec![embed],
+        };
+        if let Some(id) = self.state.board_message.clone() {
+            match hook.edit(&id, &msg).await {
+                Ok(()) => return,
+                Err(SendError::Missing) => {
+                    info!("табло: сообщение {id} удалено, отправляю новое");
+                }
+                Err(e) => {
+                    warn!("табло: {e}");
+                    return;
+                }
+            }
+        }
+        match hook.send_returning_id(&msg).await {
+            Ok(id) => {
+                info!("табло: новое сообщение {id}");
+                self.state.board_message = Some(id);
+            }
+            Err(e) => warn!("табло: {e}"),
+        }
     }
 
     /// Кого отслеживаем: участники клана + игроки из POKEBONK_PLAYERS.
@@ -261,12 +406,24 @@ impl Tracker {
         }
     }
 
-    fn queue(&mut self, messages: Vec<Message>) {
-        self.state.outbox.extend(messages);
-        let extra = self.state.outbox.len().saturating_sub(MAX_OUTBOX);
+    fn queue(&mut self, channel: Channel, messages: Vec<Message>) {
+        self.state.queue.extend(
+            messages
+                .into_iter()
+                .map(|message| Outgoing { channel, message }),
+        );
+        let extra = self.state.queue.len().saturating_sub(MAX_OUTBOX);
         if extra > 0 {
             warn!("очередь сообщений переполнена, выбрасываю {extra} самых старых");
-            self.state.outbox.drain(..extra);
+            self.state.queue.drain(..extra);
+        }
+    }
+
+    fn hook_for(&self, channel: Channel) -> Option<&Webhook> {
+        match channel {
+            Channel::Runs => Some(&self.hook),
+            Channel::Digest => self.digest_hook.as_ref().or(Some(&self.hook)),
+            Channel::News => self.news_hook.as_ref(),
         }
     }
 
@@ -274,23 +431,28 @@ impl Tracker {
     /// останавливается и оставляет остаток на следующий цикл.
     async fn flush(&mut self) {
         let mut sent = 0;
-        while let Some(msg) = self.state.outbox.first() {
+        while let Some(out) = self.state.queue.first() {
+            let Some(hook) = self.hook_for(out.channel) else {
+                warn!("канал {:?} не настроен, сообщение выброшено", out.channel);
+                self.state.queue.remove(0);
+                continue;
+            };
             if sent > 0 {
                 tokio::time::sleep(MESSAGE_GAP).await;
             }
-            match self.hook.send(msg).await {
+            match hook.send(&out.message).await {
                 Ok(()) => {
-                    self.state.outbox.remove(0);
+                    self.state.queue.remove(0);
                     sent += 1;
                 }
-                Err(SendError::Rejected(e)) => {
+                Err(e @ (SendError::Rejected(_) | SendError::Missing)) => {
                     error!("lolka: {e}; сообщение выброшено");
-                    self.state.outbox.remove(0);
+                    self.state.queue.remove(0);
                 }
                 Err(e @ SendError::Temporary(_)) => {
                     warn!(
                         "lolka: {e}; повторю позже (в очереди {})",
-                        self.state.outbox.len()
+                        self.state.queue.len()
                     );
                     break;
                 }

@@ -1,6 +1,7 @@
 //! Настройки из переменных окружения (в Docker — из файла `bot.env`).
 
 use crate::render::RenderCfg;
+use crate::tz::{self, Zone};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -71,6 +72,24 @@ pub struct Config {
     pub log_level: String,
     pub render: RenderCfg,
     pub build_details: BuildDetails,
+    /// Канал новостей игры (отдельный вебхук); `None` — выключено.
+    pub news_webhook: Option<Secret>,
+    pub news_every: Duration,
+    /// Канал с живым табло клана (отдельный вебхук); `None` — выключено.
+    pub board_webhook: Option<Secret>,
+    pub board_every: Duration,
+    /// Итоги дня; `None` — выключены.
+    pub digest: Option<DigestCfg>,
+    /// Часовой пояс для итогов дня.
+    pub zone: Zone,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigestCfg {
+    /// Во сколько публиковать, минута суток по местному времени.
+    pub minute: i64,
+    /// Свой вебхук; по умолчанию — основной канал.
+    pub webhook: Option<Secret>,
 }
 
 impl Config {
@@ -90,6 +109,13 @@ impl Config {
         if !webhook_url.starts_with("https://") {
             return Err("LOLKA_WEBHOOK_URL должен начинаться с https://".into());
         }
+        let optional_hook = |key: &str| -> Result<Option<Secret>, String> {
+            match var(key) {
+                Some(url) if url.starts_with("https://") => Ok(Some(Secret::new(url))),
+                Some(_) => Err(format!("{key} должен начинаться с https://")),
+                None => Ok(None),
+            }
+        };
 
         let clan_id = var("POKEBONK_CLAN_ID");
         if let Some(id) = &clan_id {
@@ -144,6 +170,27 @@ impl Config {
             }
         };
 
+        let news_secs = secs("NEWS_POLL_SECS", 1800, 300)?.max(300);
+        let board_secs = secs("BOARD_UPDATE_SECS", 300, 60)?.max(60);
+
+        let zone_name = var("TIMEZONE").unwrap_or_else(|| "Europe/Moscow".to_string());
+        let zone = Zone::parse(&zone_name).ok_or_else(|| {
+            format!("TIMEZONE: неизвестный пояс «{zone_name}» (пример: Europe/Moscow, +03:00)")
+        })?;
+        let digest = match var("DIGEST_TIME").as_deref() {
+            Some("off" | "none" | "0") => None,
+            other => {
+                let text = other.unwrap_or("23:00");
+                let minute = tz::parse_hhmm(text).ok_or_else(|| {
+                    format!("DIGEST_TIME: ожидается ЧЧ:ММ или off, получено «{text}»")
+                })?;
+                Some(DigestCfg {
+                    minute,
+                    webhook: optional_hook("LOLKA_DIGEST_WEBHOOK_URL")?,
+                })
+            }
+        };
+
         let sprite_url = match get("SPRITE_URL") {
             None => Some(DEFAULT_SPRITE.to_string()),
             Some(s) if s.trim().is_empty() => None,
@@ -173,6 +220,12 @@ impl Config {
                 player_url: var("PLAYER_URL"),
             },
             build_details,
+            news_webhook: optional_hook("LOLKA_NEWS_WEBHOOK_URL")?,
+            news_every: Duration::from_secs(news_secs),
+            board_webhook: optional_hook("LOLKA_BOARD_WEBHOOK_URL")?,
+            board_every: Duration::from_secs(board_secs),
+            digest,
+            zone,
         })
     }
 }
@@ -203,6 +256,17 @@ mod tests {
         assert_eq!(c.render.sprite_url.as_deref(), Some(DEFAULT_SPRITE));
         assert!(!c.dry_run);
         assert_eq!(c.build_details, BuildDetails::Long);
+        assert_eq!(c.news_webhook, None);
+        assert_eq!(c.board_webhook, None);
+        assert_eq!(c.board_every, Duration::from_secs(300));
+        assert_eq!(
+            c.digest,
+            Some(DigestCfg {
+                minute: 23 * 60,
+                webhook: None
+            })
+        );
+        assert_eq!(c.zone, Zone::Fixed(180));
         assert!(!format!("{c:?}").contains("abc"), "секрет попал в Debug");
     }
 
@@ -220,6 +284,40 @@ mod tests {
         assert_eq!(c.season_every, None);
         assert_eq!(c.render.sprite_url, None);
         assert!(c.dry_run);
+    }
+
+    #[test]
+    fn channels_and_digest() {
+        let c = cfg(&[
+            HOOK,
+            ("POKEBONK_PLAYERS", "a"),
+            (
+                "LOLKA_NEWS_WEBHOOK_URL",
+                "https://lolka.app/api/webhooks/2/n",
+            ),
+            (
+                "LOLKA_BOARD_WEBHOOK_URL",
+                "https://lolka.app/api/webhooks/3/b",
+            ),
+            ("DIGEST_TIME", "21:30"),
+            ("TIMEZONE", "Europe/Warsaw"),
+        ])
+        .unwrap();
+        assert!(c.news_webhook.is_some());
+        assert!(c.board_webhook.is_some());
+        assert_eq!(c.digest.unwrap().minute, 21 * 60 + 30);
+        assert_eq!(c.zone, Zone::Eu(60));
+
+        let off = cfg(&[HOOK, ("POKEBONK_PLAYERS", "a"), ("DIGEST_TIME", "off")]).unwrap();
+        assert_eq!(off.digest, None);
+        assert!(cfg(&[HOOK, ("POKEBONK_PLAYERS", "a"), ("DIGEST_TIME", "25:00")]).is_err());
+        assert!(cfg(&[HOOK, ("POKEBONK_PLAYERS", "a"), ("TIMEZONE", "Mars")]).is_err());
+        assert!(cfg(&[
+            HOOK,
+            ("POKEBONK_PLAYERS", "a"),
+            ("LOLKA_NEWS_WEBHOOK_URL", "http://x")
+        ])
+        .is_err());
     }
 
     #[test]

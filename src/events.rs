@@ -199,6 +199,7 @@ pub fn clan_update(prev: Option<&ClanSnap>, c: &Clan) -> ClanDiff {
                 name: m.name.clone(),
                 role: m.role.clone(),
                 runs: m.runs,
+                points: m.points,
             };
             (m.id.clone(), snap)
         })
@@ -529,6 +530,7 @@ mod tests {
             name: format!("n-{id}"),
             role: role.into(),
             runs,
+            points: runs * 100,
         }
     }
 

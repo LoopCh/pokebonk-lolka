@@ -1,7 +1,7 @@
 //! Состояние бота в JSON-файле: что уже видели, гостевой токен, неотправленные
 //! сообщения. Благодаря нему после перезапуска бот не повторяет старые забеги.
 
-use crate::model::{ClanSnap, Message, PlayerSnap, SeasonSnap};
+use crate::model::{ClanSnap, DayStats, Message, PlayerSnap, SeasonSnap};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -22,8 +22,34 @@ pub struct State {
     pub names: BTreeMap<String, String>,
     pub clan: Option<ClanSnap>,
     pub season: SeasonSnap,
-    /// Сообщения, которые не удалось отправить; отправятся в следующий раз.
+    /// Старая очередь (до версии 0.3): переносится в `queue` при запуске.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outbox: Vec<Message>,
+    /// Сообщения, которые не удалось отправить; отправятся в следующий раз.
+    pub queue: Vec<Outgoing>,
+    /// Статистика для итогов дня.
+    pub day: DayStats,
+    /// id последней виденной новости; `None` — новости ещё не загружались.
+    pub news_seen: Option<i64>,
+    /// id сообщения с табло клана в Lolka.
+    pub board_message: Option<String>,
+}
+
+/// В какой канал отправить.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    #[default]
+    Runs,
+    Digest,
+    News,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Outgoing {
+    pub channel: Channel,
+    pub message: Message,
 }
 
 impl State {

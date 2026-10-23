@@ -122,6 +122,9 @@ pub struct Member {
     /// Забеги в зачёт клана (считаются с момента вступления).
     #[serde(deserialize_with = "crate::serde_util::int")]
     pub runs: i64,
+    /// Очки, принесённые клану в текущем сезоне.
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub points: i64,
 }
 
 /// Результат клана в текущем сезоне.
@@ -230,6 +233,35 @@ impl Build {
     }
 }
 
+/// Новость из `GET /news`. Основной текст — по-испански, переводы в `tr`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewsItem {
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub id: i64,
+    #[serde(flatten)]
+    pub text: NewsText,
+    /// `novedad`, `actualizacion`, `parche`…
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub tag: String,
+    #[serde(deserialize_with = "crate::serde_util::int")]
+    pub date: i64,
+    /// Переводы по коду языка (`ru`, `en`…).
+    pub tr: BTreeMap<String, NewsText>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewsText {
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub title: String,
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub summary: String,
+    /// Markdown со вставками игры: `:::nuevo … :::`, `{pkm:145}`, `{obj:rare-candy}`.
+    #[serde(deserialize_with = "crate::serde_util::string")]
+    pub body: String,
+}
+
 /// Ошибка API: `{"error": "Tu sesión ha caducado. Vuelve a entrar."}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
@@ -268,6 +300,7 @@ pub struct MemberSnap {
     pub name: String,
     pub role: String,
     pub runs: i64,
+    pub points: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -276,6 +309,38 @@ pub struct ClanSeasonSnap {
     pub points: i64,
     pub rank: Option<i64>,
     pub clans: Option<i64>,
+}
+
+/// Статистика клана с последних итогов дня.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DayStats {
+    /// Когда начался учёт (мс Unix).
+    pub since: i64,
+    /// Когда публиковать итоги (мс Unix); 0 — расписание ещё не задано.
+    pub next_at: i64,
+    /// По id игрока.
+    pub players: BTreeMap<String, DayPlayer>,
+    /// Сезон, очки и место клана на начало дня.
+    pub season_start: Option<(i64, ClanSeasonSnap)>,
+    /// Очки участников на начало дня.
+    pub points_start: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DayPlayer {
+    pub name: String,
+    pub runs: i64,
+    pub wins: i64,
+    pub kills: i64,
+    /// Лучшие забеги дня: (значение, покемон).
+    pub best_time: Option<(f64, i64)>,
+    pub best_kills: Option<(i64, i64)>,
+    pub best_damage: Option<(i64, i64)>,
+    pub shinies: i64,
+    pub legendaries: i64,
+    pub first_win: bool,
 }
 
 /// Что бот помнит о сезоне.

@@ -24,8 +24,43 @@ pub fn iso8601(ms: i64) -> String {
     )
 }
 
+/// (год, месяц, день) -> дни от 1970-01-01. Алгоритм Говарда Хиннанта.
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Дата по-русски: `23 октября`.
+pub fn fmt_date_ru(month: i64, day: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ];
+    let name = usize::try_from(month - 1)
+        .ok()
+        .and_then(|i| MONTHS.get(i))
+        .copied()
+        .unwrap_or("?");
+    format!("{day} {name}")
+}
+
 /// Дни от 1970-01-01 -> (год, месяц, день). Алгоритм Говарда Хиннанта.
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -166,6 +201,16 @@ mod tests {
         assert_eq!(iso8601(1_792_368_000_000), "2026-10-19T00:00:00.000Z");
         assert_eq!(iso8601(1_792_540_800_000), "2026-10-21T00:00:00.000Z");
         assert_eq!(iso8601(951_782_400_123), "2000-02-29T00:00:00.123Z");
+    }
+
+    #[test]
+    fn civil_roundtrip() {
+        for days in [-1000, 0, 59, 10_957, 20_745, 30_000] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
+        assert_eq!(days_from_civil(2026, 10, 19), 20_745);
+        assert_eq!(fmt_date_ru(10, 23), "23 октября");
     }
 
     #[test]

@@ -1,167 +1,35 @@
-//! Человекочитаемые названия: покемоны, биомы, роли в клане.
+//! Человекочитаемые названия: покемоны, предметы, приёмы, биомы, роли в клане.
 
-/// Покемоны первого поколения, индекс = номер в покедексе - 1.
-const POKEMON_RU: [&str; 151] = [
-    "Бульбазавр",
-    "Ивизавр",
-    "Венузавр",
-    "Чармандер",
-    "Чармелеон",
-    "Чаризард",
-    "Сквиртл",
-    "Вартортл",
-    "Бластойз",
-    "Катерпи",
-    "Метапод",
-    "Баттерфри",
-    "Видл",
-    "Какуна",
-    "Бидрилл",
-    "Пиджи",
-    "Пиджеотто",
-    "Пиджеот",
-    "Раттата",
-    "Ратикейт",
-    "Спироу",
-    "Фироу",
-    "Эканс",
-    "Эрбок",
-    "Пикачу",
-    "Райчу",
-    "Сэндшру",
-    "Сэндслэш",
-    "Нидоран♀",
-    "Нидорина",
-    "Нидоквин",
-    "Нидоран♂",
-    "Нидорино",
-    "Нидокинг",
-    "Клефэйри",
-    "Клефэйбл",
-    "Вульпикс",
-    "Найнтейлз",
-    "Джиглипафф",
-    "Вигглитафф",
-    "Зубат",
-    "Голбат",
-    "Оддиш",
-    "Глум",
-    "Вайлплум",
-    "Парас",
-    "Парасект",
-    "Венонат",
-    "Веномот",
-    "Диглетт",
-    "Дагтрио",
-    "Мяут",
-    "Персиан",
-    "Псайдак",
-    "Голдак",
-    "Манки",
-    "Праймейп",
-    "Гроулит",
-    "Арканайн",
-    "Поливаг",
-    "Поливирл",
-    "Поливрат",
-    "Абра",
-    "Кадабра",
-    "Алаказам",
-    "Мачоп",
-    "Мачоук",
-    "Мачамп",
-    "Беллспраут",
-    "Випинбелл",
-    "Виктрибел",
-    "Тентакул",
-    "Тентакруэль",
-    "Джеодуд",
-    "Гравелер",
-    "Голем",
-    "Понита",
-    "Рапидэш",
-    "Слоупок",
-    "Слоубро",
-    "Магнемайт",
-    "Магнетон",
-    "Фарфетчд",
-    "Додуо",
-    "Додрио",
-    "Сил",
-    "Дьюгонг",
-    "Граймер",
-    "Мак",
-    "Шеллдер",
-    "Клойстер",
-    "Гастли",
-    "Хонтер",
-    "Генгар",
-    "Оникс",
-    "Драузи",
-    "Гипно",
-    "Крабби",
-    "Кинглер",
-    "Вольторб",
-    "Электрод",
-    "Экзегут",
-    "Экзегутор",
-    "Кьюбон",
-    "Маровак",
-    "Хитмонли",
-    "Хитмончан",
-    "Ликитунг",
-    "Коффинг",
-    "Визинг",
-    "Райхорн",
-    "Райдон",
-    "Ченси",
-    "Тангела",
-    "Кангасхан",
-    "Хорси",
-    "Сидра",
-    "Голдин",
-    "Сикинг",
-    "Старью",
-    "Старми",
-    "Мистер Майм",
-    "Сайтер",
-    "Джинкс",
-    "Электабазз",
-    "Магмар",
-    "Пинсир",
-    "Торос",
-    "Мэджикарп",
-    "Гаярдос",
-    "Лапрас",
-    "Дитто",
-    "Иви",
-    "Вапореон",
-    "Джолтеон",
-    "Флареон",
-    "Поригон",
-    "Оманайт",
-    "Омастар",
-    "Кабуто",
-    "Кабутопс",
-    "Аэродактиль",
-    "Снорлакс",
-    "Артикуно",
-    "Запдос",
-    "Молтрес",
-    "Дратини",
-    "Драгонэйр",
-    "Драгонайт",
-    "Мьюту",
-    "Мью",
-];
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// Словарь «код -> русское название» из перевода самой игры.
+/// Пересобирается скриптом `scripts/gen-names.py`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct Names {
+    pokemon: HashMap<String, String>,
+    types: HashMap<String, String>,
+    items: HashMap<String, String>,
+    moves: HashMap<String, String>,
+    abilities: HashMap<String, String>,
+}
+
+fn names() -> &'static Names {
+    static NAMES: OnceLock<Names> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        // Файл проверяется тестом, так что здесь он всегда корректен.
+        serde_json::from_str(include_str!("names_ru.json")).unwrap_or_default()
+    })
+}
 
 /// Имя покемона по номеру покедекса; для неизвестных — `#номер`.
 pub fn pokemon(species: i64) -> String {
-    usize::try_from(species)
-        .ok()
-        .and_then(|n| n.checked_sub(1))
-        .and_then(|i| POKEMON_RU.get(i))
-        .map_or_else(|| format!("#{species}"), |name| (*name).to_string())
+    names()
+        .pokemon
+        .get(&species.to_string())
+        .cloned()
+        .unwrap_or_else(|| format!("#{species}"))
 }
 
 /// Название биома. Неизвестные биомы показываются как есть, с заглавной буквы.
@@ -193,57 +61,45 @@ pub fn role(code: &str) -> String {
     }
 }
 
-// Названия из сборки. API отдаёт коды, а русские названия игра подставляет
-// сама; здесь те, что известны точно (из интерфейса игры). Остальные коды
-// показываются по-английски: `life-orb` -> `Life Orb`.
-
-const ITEMS_RU: &[(&str, &str)] = &[
-    ("binding-band", "Связывающая повязка"),
-    ("dusk-stone", "Сумеречный камень"),
-    ("exp-share", "Делитель опыта"),
-    ("light-clay", "Лёгкая глина"),
-    ("lucky-egg", "Счастливое яйцо"),
-    ("metronome", "Метроном"),
-    ("silver-powder", "Серебряная пыль"),
-    ("star-piece", "Звёздный осколок"),
-];
-
-const MOVES_RU: &[(&str, &str)] = &[
-    ("signal-beam", "Сигнальный луч"),
-    ("silver-wind", "Серебряный ветер"),
-    ("smog", "Смог"),
-    ("supersonic", "Ультразвук"),
-];
-
-const VITAMINS_RU: &[(&str, &str)] = &[
-    ("elixir", "Эликсир"),
-    ("pp-up", "Больше PP"),
-    ("star-piece", "Звёздный осколок"),
-];
-
-const PASSIVES_RU: &[(&str, &str)] = &[("compound-eyes", "Составные глаза")];
+// Названия из сборки. Неизвестные коды (новинки игры, которых ещё нет в
+// словаре) показываются по-английски: `life-orb` -> `Life Orb`.
 
 pub fn item(code: &str) -> String {
-    lookup(ITEMS_RU, code)
+    names()
+        .items
+        .get(code)
+        .cloned()
+        .unwrap_or_else(|| pretty_code(code))
 }
 
-pub fn move_name(code: &str) -> String {
-    lookup(MOVES_RU, code)
-}
-
+/// Витамины в игре — тоже предметы.
 pub fn vitamin(code: &str) -> String {
-    lookup(VITAMINS_RU, code)
+    item(code)
 }
 
 pub fn passive(code: &str) -> String {
-    lookup(PASSIVES_RU, code)
+    names()
+        .abilities
+        .get(code)
+        .cloned()
+        .unwrap_or_else(|| pretty_code(code))
 }
 
-fn lookup(table: &[(&str, &str)], code: &str) -> String {
-    table
-        .iter()
-        .find(|(k, _)| *k == code)
-        .map_or_else(|| pretty_code(code), |(_, v)| (*v).to_string())
+/// Приём. Кроме обычных есть слияния игры: `fu-t-ground` — слияние типов,
+/// `fu-104` — фирменное слияние покемона №104.
+pub fn move_name(code: &str) -> String {
+    let n = names();
+    if let Some(name) = n.moves.get(code) {
+        return name.clone();
+    }
+    if let Some(ty) = code.strip_prefix("fu-t-") {
+        let ty = n.types.get(ty).cloned().unwrap_or_else(|| pretty_code(ty));
+        return format!("Слияние типов: {ty}");
+    }
+    if let Some(num) = code.strip_prefix("fu-").and_then(|r| r.parse::<i64>().ok()) {
+        return format!("Фирменное слияние: {}", pokemon(num));
+    }
+    pretty_code(code)
 }
 
 /// `life-orb` -> `Life Orb`, `pp-max` -> `PP Max`.
@@ -277,7 +133,8 @@ mod tests {
         assert_eq!(pokemon(92), "Гастли");
         assert_eq!(pokemon(151), "Мью");
         assert_eq!(pokemon(0), "#0");
-        assert_eq!(pokemon(152), "#152");
+        assert_eq!(pokemon(152), "Chikorita"); // вне Gen 1 игра не переводит
+        assert_eq!(pokemon(9999), "#9999");
         assert_eq!(pokemon(-3), "#-3");
     }
 
@@ -291,14 +148,28 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_is_valid() {
+        let parsed: Names = serde_json::from_str(include_str!("names_ru.json")).unwrap();
+        assert!(parsed.pokemon.len() >= 151);
+        assert!(parsed.items.len() > 100);
+        assert!(parsed.moves.len() > 500);
+    }
+
+    #[test]
     fn build_names() {
         assert_eq!(item("lucky-egg"), "Счастливое яйцо");
-        assert_eq!(item("life-orb"), "Life Orb");
-        assert_eq!(item("pp-max"), "PP Max");
+        assert_eq!(item("life-orb"), "Сфера жизни");
+        assert_eq!(item("brand-new-thing"), "Brand New Thing");
         assert_eq!(move_name("silver-wind"), "Серебряный ветер");
-        assert_eq!(move_name("fu-t-grass"), "Fu T Grass");
-        assert_eq!(vitamin("exp-candy"), "Exp Candy");
-        assert_eq!(passive("photosynthesis"), "Photosynthesis");
+        assert_eq!(move_name("razor-leaf"), "Бритвенный лист");
+        assert_eq!(move_name("fu-t-ground"), "Слияние типов: Земляной");
+        assert_eq!(move_name("fu-104"), "Фирменное слияние: Кубон");
+        assert_eq!(move_name("fu-x"), "Fu X");
+        assert_eq!(vitamin("exp-candy"), "Конфета опыта");
+        assert_eq!(vitamin("calcium"), "Кальций");
+        assert_eq!(passive("compound-eyes"), "Составные глаза");
+        assert_eq!(passive("photosynthesis"), "Фотосинтез");
+        assert_eq!(pretty_code("pp-max"), "PP Max");
         assert_eq!(pretty_code(""), "");
     }
 }

@@ -1,4 +1,4 @@
-//! Отправка сообщений во входящий вебхук Lolka.
+//! Отправка и редактирование сообщений через входящий вебхук Lolka.
 //!
 //! Лимиты: 30 запросов в минуту на вебхук. На 429 сервер присылает
 //! `Retry-After` (секунды) — ждём столько, сколько просят.
@@ -16,6 +16,8 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(120);
 pub enum SendError {
     /// Сеть, 5xx, 429 — попробуем снова в следующем цикле.
     Temporary(String),
+    /// Сообщения больше нет (его удалили) — для редактирования табло.
+    Missing,
     /// 4xx: Lolka отвергла сообщение; повторять бессмысленно.
     Rejected(String),
 }
@@ -24,9 +26,18 @@ impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Temporary(m) => write!(f, "временная ошибка: {m}"),
+            Self::Missing => write!(f, "сообщение не найдено"),
             Self::Rejected(m) => write!(f, "сообщение отклонено: {m}"),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Op<'a> {
+    /// Новое сообщение; `wait` — вернуть созданное сообщение (нужен его id).
+    Post { wait: bool },
+    /// Изменить своё сообщение.
+    Edit { id: &'a str },
 }
 
 pub struct Webhook {
@@ -40,24 +51,54 @@ impl Webhook {
         Self { http, url, dry_run }
     }
 
+    /// Отправить сообщение.
     pub async fn send(&self, msg: &Message) -> Result<(), SendError> {
+        self.execute(Op::Post { wait: false }, msg)
+            .await
+            .map(|_| ())
+    }
+
+    /// Отправить сообщение и вернуть его id (чтобы потом редактировать).
+    pub async fn send_returning_id(&self, msg: &Message) -> Result<String, SendError> {
+        let body = self.execute(Op::Post { wait: true }, msg).await?;
+        message_id(&body).ok_or_else(|| {
+            SendError::Rejected(format!(
+                "в ответе нет id сообщения: {}",
+                crate::util::truncate(&body, 200)
+            ))
+        })
+    }
+
+    /// Заменить содержимое ранее отправленного сообщения.
+    pub async fn edit(&self, id: &str, msg: &Message) -> Result<(), SendError> {
+        self.execute(Op::Edit { id }, msg).await.map(|_| ())
+    }
+
+    /// Запрос с повторами; возвращает тело ответа.
+    async fn execute(&self, op: Op<'_>, msg: &Message) -> Result<String, SendError> {
         if self.dry_run {
             let json = serde_json::to_string_pretty(msg).unwrap_or_default();
-            info!("[DRY_RUN] сообщение в Lolka:\n{json}");
-            return Ok(());
+            let what = match op {
+                Op::Post { .. } => "сообщение".to_string(),
+                Op::Edit { id } => format!("правка сообщения {id}"),
+            };
+            info!("[DRY_RUN] {what} в Lolka:\n{json}");
+            return Ok(r#"{"id":"dry-run"}"#.to_string());
         }
 
         let mut last = String::new();
         for attempt in 1..=ATTEMPTS {
             // URL содержит токен, поэтому в ошибках reqwest его вырезаем.
-            let result = self
-                .http
-                .post(self.url.expose())
-                .query(&[("wait", "false")])
-                .json(msg)
-                .send()
-                .await;
-            let resp = match result {
+            let request = match op {
+                Op::Post { wait } => self
+                    .http
+                    .post(self.url.expose())
+                    .query(&[("wait", if wait { "true" } else { "false" })]),
+                Op::Edit { id } => self
+                    .http
+                    .patch(format!("{}/messages/{id}", self.url.expose())),
+            };
+            let resp = match request.json(msg).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     last = format!("{:#}", anyhow::Error::new(e.without_url()));
@@ -68,9 +109,6 @@ impl Webhook {
             };
 
             let status = resp.status();
-            if status.is_success() {
-                return Ok(());
-            }
             if status == StatusCode::TOO_MANY_REQUESTS {
                 let wait = retry_after(
                     resp.headers()
@@ -85,6 +123,12 @@ impl Webhook {
             }
 
             let body = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                return Ok(body);
+            }
+            if status == StatusCode::NOT_FOUND && matches!(op, Op::Edit { .. }) {
+                return Err(SendError::Missing);
+            }
             let detail = format!(
                 "HTTP {}: {}",
                 status.as_u16(),
@@ -99,6 +143,16 @@ impl Webhook {
             return Err(SendError::Rejected(detail));
         }
         Err(SendError::Temporary(last))
+    }
+}
+
+/// id из ответа Lolka: число (snowflake) или строка.
+fn message_id(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    match v.get("id")? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
@@ -134,5 +188,17 @@ mod tests {
         assert_eq!(retry_after(None), None);
         assert_eq!(backoff(1), Duration::from_secs(2));
         assert_eq!(backoff(3), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn message_ids() {
+        // Ответ Lolka из переписки: id — большое число.
+        assert_eq!(
+            message_id(r#"{"id":928823227401216,"content":"x"}"#).as_deref(),
+            Some("928823227401216")
+        );
+        assert_eq!(message_id(r#"{"id":"42"}"#).as_deref(), Some("42"));
+        assert_eq!(message_id(r#"{"content":"x"}"#), None);
+        assert_eq!(message_id("not json"), None);
     }
 }

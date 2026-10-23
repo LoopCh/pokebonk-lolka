@@ -4,7 +4,7 @@
 //! * `/clans/{id}` и `/leaderboard` — нужна сессия; хватает гостевой из
 //!   `POST /auth/guest`. Протухший токен заменяется новым автоматически.
 
-use crate::model::{ApiError, Clan, GuestAuth, Leaderboard, Player, RunBuild};
+use crate::model::{ApiError, Clan, GuestAuth, Leaderboard, NewsItem, Player, RunBuild};
 use anyhow::{bail, Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
@@ -56,6 +56,12 @@ impl Api {
         // Боту нужен только блок info о сезоне, поэтому список — минимальный.
         self.get("/leaderboard", &[("mode", "kills"), ("limit", "1")], true)
             .await
+    }
+
+    /// Новости игры. Ответ большой (все переводы), поэтому просим только
+    /// последние; если сервер параметр не знает, он вернёт все — тоже годится.
+    pub async fn news(&mut self) -> Result<Vec<NewsItem>> {
+        self.get("/news", &[("limit", "5")], true).await
     }
 
     /// Сборка забега: приёмы, предметы, витамины, статы.
